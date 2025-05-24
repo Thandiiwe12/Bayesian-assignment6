@@ -1,0 +1,100 @@
+---
+title: "Assignment 6"
+author: "Thandiwe Zwane"
+date: "2025-05-08"
+output: word_document
+---
+
+## 1. 
+
+In this problem, residual (error) variability refers to the part of the variation in presentation marks that remains after accounting for known influences such as student or group ability and assessor differences. It captures the random, unpredictable fluctuations in scores that cannot be fully explained by the model. Several factors contribute to this residual variability. These include day-to-day inconsistencies in student performance, such as nervousness or momentary lapses, as well as random inconsistencies in how assessors interpret and apply the rubric. Even with a structured marking guide, some level of subjectivity remains, leading to slight differences in how scores are awarded. Additionally, unmeasured factors such as group dynamics or individual speaking time during the presentation may influence the marks but are not explicitly included in the model. In terms of statistical modelling, the marks can be seen as being influenced by fixed effects—such as the underlying performance of each student or group—and random effects—such as the variability in marking tendencies between different assessors. However, even after accounting for these fixed and random effects, there is still some leftover variation, known as the residual or error term, which represents the natural randomness or noise in the data that cannot be explained by the model.
+
+## 2. 
+
+
+## Loading in libraries
+
+```{r, results='hide'}
+#| warning: false
+#| message: false
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(naniar)
+```
+
+
+## 3. Read in and visualize data
+
+```{r}
+d <- read_excel("BayesAssignment6of2025.xlsx", sheet = "2019369780")
+```
+
+```{r}
+lecturer_cols <- grep("Lecturer", names(d), value = TRUE)
+lecturer_cols
+
+missing_df <- d %>%
+  summarise(across(all_of(lecturer_cols), ~sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Lecturer", values_to = "Missing_Count") %>%
+  mutate(Present_Count = 17 - Missing_Count)
+
+ggplot(missing_df, aes(x = Lecturer, y = Missing_Count)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = Missing_Count), vjust = -0.5) +
+  labs(title = "Number of Missing Marks per Lecturer",
+       x = "Lecturer", y = "Missing Count") +
+  theme_minimal()
+```
+
+My assigned dataset contains 17 rows, each representing a group presentation, and 9 columns of marks from different lecturers (LecturerA to LecturerI). Each group was evaluated by a subset of these lecturers. The data is incomplete, with some lecturers missing marks for several groups. For instance, LecturerA evaluated 15 groups, while LecturerI marked only 5. The missingness is structured and non-random, reflecting which presentations were assigned to each lecturer. 
+
+```{r}
+long_data <- d %>%
+  select(Group, all_of(lecturer_cols)) %>%
+  pivot_longer(cols = starts_with("Lecturer"), names_to = "Lecturer", values_to = "Mark") %>%
+  filter(!is.na(Mark))  # Remove rows where mark is missing
+
+glimpse(long_data)
+
+head(long_data)
+```
+
+To prepare the data for mixed-effects modelling, I reshaped the wide-format dataset into long format. Each row now corresponds to a single (Group, Lecturer, Mark) observation. Rows with missing marks were removed, as these will not contribute to the likelihood in the mixed model. This transformation allows us to model Group effects as fixed and Lecturer effects as random, accounting for the imbalance in which lecturers saw which groups.
+
+## 5. 
+
+In the context of this honours research presentation evaluation, the goal is to fairly estimate each group's performance while accounting for assessor variability. To model this appropriately using a mixed-effects model, we must distinguish between fixed effects (which are of direct interest and whose levels we want to estimate) and random effects (which represent random variation in the data-generating process).
+
+Group should be treated as a fixed effect. This is because we are specifically interested in estimating the performance of each individual group. These groups are not sampled from a larger population — they are all the actual student groups presenting this year. Therefore, we want to estimate and interpret the specific effect (i.e., mean performance) of each group.
+
+Lecturer (or assessor) should be treated as a random effect. This is because we are not primarily interested in estimating the effect of each specific lecturer, but rather in accounting for the variability introduced by having different lecturers mark different groups. The lecturers can be considered a random sample from a larger conceptual population of "possible assessors," and our goal is to model the variability in marking behaviour across assessors rather than to estimate their individual biases. Treating Lecturer as a random effect also helps us borrow strength across groups, especially since not all lecturers see all groups.
+
+By specifying Group as a fixed effect and Lecturer as a random effect, we allow the model to focus on estimating true group differences in performance, while properly adjusting for unbalanced exposure to assessors and random differences in marking style.
+
+## 6. 
+
+```{r}
+library(brms)
+
+# Ensure long_data is loaded from Q4
+# This assumes the long_data includes columns: Group, Lecturer, Mark
+
+# Fit Bayesian mixed model
+model <- brm(
+  formula = Mark ~ 0 + Group + (1 | Lecturer),  # No intercept, fixed effects for each group
+  data = long_data,
+  family = gaussian(),
+  prior = c(
+    prior(normal(0, 10), class = "b"),              # Vague prior for group fixed effects
+    prior(cauchy(0, 2), class = "sd"),              # Weakly informative prior for lecturer random effect
+    prior(cauchy(0, 2), class = "sigma")            # Weakly informative prior for residual error
+  ),
+  chains = 4,
+  iter = 2000,
+  seed = 123
+)
+
+```
+
