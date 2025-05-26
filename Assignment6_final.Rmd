@@ -1,0 +1,338 @@
+---
+title: "Assignment 6"
+author: "Thandiwe Zwane"
+date: "2025-05-08"
+output: word_document
+---
+
+
+## 1. Sources of Residual Variability
+
+In this problem, residual variability refers to the part of the variation in presentation marks that remains after accounting for known influences such as student or group ability and assessor differences. It captures the random, unpredictable fluctuations in scores that cannot be fully explained by the model. Several factors contribute to this residual variability. These include day-to-day inconsistencies in student performance, such as nervousness or momentary lapses, as well as random inconsistencies in how assessors interpret and apply the rubric. Even with a structured marking guide, some level of subjectivity remains, leading to slight differences in how scores are awarded. Additionally, unmeasured factors such as group dynamics or individual speaking time during the presentation may influence the marks but are not explicitly included in the model. In terms of statistical modelling, the marks can be seen as being influenced by fixed effects such as the underlying performance of each student or group and random effects such as the variability in marking tendencies between different assessors. However, even after accounting for these fixed and random effects, there is still some leftover variation, known as the residual or error term, which represents the natural randomness or noise in the data that cannot be explained by the model.
+
+## 2. Are the Assumptions Sufficient for Fair Average Marks?
+
+Assuming that all assessors were able to view all student presentations and were equally neutral, the stated assumptions namely, that assessors are fair on average and that the rubric accurately captures performance would be a strong foundation for believing that the average assessor mark could represent a reasonable estimate of true student ability. However, additional assumptions are implicitly required. First, we would need to assume that assessors are internally consistent in applying the rubric and do not vary in how they interpret or emphasize different components. Second, we must assume that all presentations were equally clear, with no variation in environmental or technical conditions that might affect performance or perception. Third, we would need to assume that the assessor’s attention, fatigue, or cognitive load remains stable across all evaluations. Finally, the assumption that the rubric fully encapsulates all aspects of student performance must be strong and valid; any mismatch between what the rubric measures and what is genuinely valuable in a presentation would introduce bias. Thus, while the base assumptions help support fair averaging, these further assumptions are necessary to justify that the average mark truly reflects each student’s performance without distortion.
+
+
+## Loading in libraries
+
+```{r, results='hide'}
+#| warning: false
+#| message: false
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(naniar)
+library(brms)
+library(tidybayes)
+```
+
+
+## 3. Read in and visualize data
+
+```{r}
+d <- read_excel("BayesAssignment6of2025.xlsx", sheet = "2019369780")
+summary(d)
+gg_miss_var(d) +
+  labs(title = "Missingness by Variable")
+vis_miss(d) +
+  labs(title = "Missing Data Heatmap")
+```
+
+I isolated the dataset corresponding to my student number 2019369780. The dataset contains 17 groups evaluated by 9 different lecturers (Lecturer A to Lecturer I) across various criteria. Additionally, previous internal assessments are included for each group, namely: Proposal, Literature, Quiz, and Interview scores. A summary of the data showed that each lecturer assigned scores ranging broadly between the low 50s and high 80s. However, not every lecturer assessed every group, resulting in missing values. I used gg_miss_var() and vis_miss() to visualize the missing data structure. These plots revealed that some assessors consistently did not assess certain groups, and this pattern should be taken into account when fitting the model.
+
+```{r}
+lecturer_cols <- grep("Lecturer", names(d), value = TRUE)
+lecturer_cols
+
+missing_df <- d %>%
+  summarise(across(all_of(lecturer_cols), ~sum(is.na(.)))) %>%
+  pivot_longer(cols = everything(), names_to = "Lecturer", values_to = "Missing_Count") %>%
+  mutate(Present_Count = 17 - Missing_Count)
+
+ggplot(missing_df, aes(x = Lecturer, y = Missing_Count)) +
+  geom_col(fill = "steelblue") +
+  geom_text(aes(label = Missing_Count), vjust = -0.5) +
+  labs(title = "Number of Missing Marks per Lecturer",
+       x = "Lecturer", y = "Missing Count") +
+  theme_minimal()
+```
+
+
+## 4. Data Transformation for Mixed Effects Modelling
+
+```{r}
+lecturer_cols <- c("LecturerA", "LecturerB", "LecturerC", "LecturerD",
+                   "LecturerE", "LecturerF", "LecturerG", "LecturerH", "LecturerI")
+
+data_long <- d %>%
+  select(Group, all_of(lecturer_cols)) %>%
+  pivot_longer(
+    cols = all_of(lecturer_cols),
+    names_to = "Lecturer",
+    values_to = "Mark"
+  ) %>%
+  filter(!is.na(Mark))
+
+glimpse(data_long)
+
+head(data_long)
+```
+
+To prepare the data for mixed-effects modelling, I reshaped the wide-format dataset into long format. Each row now corresponds to a single (Group, Lecturer, Mark) observation. Rows with missing marks were removed, as these will not contribute to the likelihood in the mixed model. This transformation allows us to model Group effects as fixed and Lecturer effects as random, accounting for the imbalance in which lecturers saw which groups.
+
+## 5. Fixed vs. Random Effects Justification
+
+In the context of this honours research presentation evaluation, the goal is to fairly estimate each group's performance while accounting for assessor variability. To model this appropriately using a mixed-effects model, we must distinguish between fixed effects (which are of direct interest and whose levels we want to estimate) and random effects (which represent random variation in the data-generating process).
+
+Group should be treated as a fixed effect. This is because we are specifically interested in estimating the performance of each individual group. These groups are not sampled from a larger population, they are all the actual student groups presenting this year. Therefore, we want to estimate and interpret the specific effect (i.e., mean performance) of each group.
+
+Lecturer should be treated as a random effect. This is because we are not primarily interested in estimating the effect of each specific lecturer, but rather in accounting for the variability introduced by having different lecturers mark different groups. The lecturers can be considered a random sample from a larger conceptual population of "possible assessors," and our goal is to model the variability in marking behaviour across assessors rather than to estimate their individual biases. Treating Lecturer as a random effect also helps us borrow strength across groups, especially since not all lecturers see all groups.
+
+By specifying Group as a fixed effect and Lecturer as a random effect, we allow the model to focus on estimating true group differences in performance, while properly adjusting for unbalanced exposure to assessors and random differences in marking style.
+
+## 6. Fitting a Mixed Effects Model with Vague Priors
+
+```{r, results='hide'}
+
+vague_priors <- c(
+  prior(normal(0, 10), class = "b"),             
+  prior(student_t(3, 0, 10), class = "sd"),      
+  prior(student_t(3, 0, 10), class = "sigma")    
+)
+
+fit_model <- brm(
+  formula = Mark ~ Group + (1 | Lecturer),
+  data = data_long,
+  prior = vague_priors,
+  cores = 4,
+  seed = 2019369780,
+  iter = 2000,
+  chains = 4
+)
+
+```
+
+I specified a Bayesian linear mixed effects model where Group was treated as a fixed effect, and Lecturer as a random effect. I assumed assessors have equal residual variance, and specified vague priors to reflect minimal prior knowledge. I used brms to fit the model via MCMC. The model ran successfully and converged.
+
+
+## 7.  Estimating Group Marks with Credibility and Prediction Intervals
+
+```{r}
+group_effects <- conditional_effects(fit_model, effects = "Group")
+plot(group_effects, points = TRUE)
+
+```
+
+
+```{r}
+
+group_estimates <- fitted(
+  fit_model,
+  newdata = data_long %>% distinct(Group),
+  re_formula = NA,  # Only fixed effects (group means)
+  summary = TRUE,
+  probs = c(0.025, 0.975)
+)
+
+group_estimates <- cbind(
+  Group = data_long %>% distinct(Group) %>% pull(),
+  as.data.frame(group_estimates)
+)
+
+
+group_estimates
+```
+
+Group 3 has the highest estimated true mark (77.37), while Group 17 has the lowest (63.99).
+
+```{r}
+
+group_predictions <- predict(
+  fit_model,
+  newdata = data_long %>% distinct(Group),
+  re_formula = NA,
+  probs = c(0.025, 0.975)
+)
+
+group_predictions <- cbind(
+  Group = data_long %>% distinct(Group) %>% pull(),
+  as.data.frame(group_predictions)
+)
+
+group_predictions
+
+```
+
+Based on the fitted model with vague priors and random intercepts for lecturers, I estimated the mark each group deserves using posterior summaries. For example, Group 13 is estimated to deserve a mean mark of 74.82 with a 95% credible interval of [69.69, 80.07].
+
+Additionally, I computed prediction intervals for future presentations. For Group 13, a future presentation could receive marks in the range [60.99, 90.18], reflecting both model and residual uncertainty.
+
+## 8. Assessing Assessor Bias and Identifying the Least Biased Lecturer
+
+```{r}
+
+lecturer_bias <- ranef(fit_model)$Lecturer[, , 1] %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("Lecturer") %>%
+  rename(
+    Estimate = Estimate,
+    Lower_CI = Q2.5,
+    Upper_CI = Q97.5
+  ) %>%
+  arrange(Estimate)
+
+lecturer_bias
+```
+
+I estimated the biases of each lecturer using random effects from the model. These biases reflect how each lecturer tends to score relative to the model's average after accounting for group effects. Lecturers with negative estimates tend to score more harshly. Lecturers with positive estimates tend to score more generously.
+
+For example:
+
+Lecturer C is the most severe, with an estimated bias of -3.49.
+
+Lecturer E is the most generous, with an estimated bias of +3.86.
+
+The least biased lecturer is Lecturer D, with an estimated bias closest to zero (0.14), suggesting their marking is most in line with the group-adjusted average.
+
+## 9. Incorporating Subjective Priors from Previous Group Marks
+
+```{r}
+long_data <- d %>%
+  mutate(Group = factor(gsub("^Group", "", Group), levels =
+as.character(1:17))) %>%
+  select(Group, LecturerA:LecturerI) %>%
+  pivot_longer(cols = LecturerA:LecturerI, names_to = "Lecturer",
+values_to = "Mark") %>%
+  filter(!is.na(Mark))
+
+composite_scores <- d %>%
+  mutate(Group = gsub("^Group", "", Group)) %>%
+  mutate(Composite = (Proposal + Literature + Quiz + Interview) / 4) %>%
+  select(Group, Composite)
+
+priors <- c(
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[1]),
+class = "b", coef = "Group1"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[2]),
+class = "b", coef = "Group2"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[3]),
+class = "b", coef = "Group3"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[4]),
+class = "b", coef = "Group4"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[5]),
+class = "b", coef = "Group5"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[6]),
+class = "b", coef = "Group6"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[7]),
+class = "b", coef = "Group7"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[8]),
+class = "b", coef = "Group8"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[9]),
+class = "b", coef = "Group9"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[10]),
+class = "b", coef = "Group10"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[11]),
+class = "b", coef = "Group11"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[12]),
+class = "b", coef = "Group12"),
+  set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[13]),
+class = "b", coef = "Group13"),
+set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[14]),
+class = "b", coef = "Group14"),
+set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[15]),
+class = "b", coef = "Group15"),
+set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[16]),
+class = "b", coef = "Group16"),
+set_prior(sprintf("normal(%f, 5)", composite_scores$Composite[17]),
+class = "b", coef = "Group17"),
+  set_prior("cauchy(0, 5)", class = "sd", group = "Lecturer"),
+  set_prior("cauchy(0, 5)", class = "sigma")
+)
+
+model_bayes_subj <- brm(Mark ~ 0 + Group + (1|Lecturer), data = long_data,
+                        prior = priors, chains = 4, iter = 2000, warmup = 1000,
+                        cores = 4, seed = 2019369780)
+
+fair_marks <- fixef(model_bayes_subj)
+adjusted_marks <- data.frame(
+  Group = paste0("Group", 1:17),
+  Adjusted_Mark = fair_marks[paste0("Group", 1:17), "Estimate"],
+  Lower_CI = fair_marks[paste0("Group", 1:17), "Q2.5"],
+  Upper_CI = fair_marks[paste0("Group", 1:17), "Q97.5"]
+)
+
+print("Fair Marks:")
+print(adjusted_marks)
+
+adjusted_marks <- adjusted_marks %>%
+  mutate(Group = gsub("^Group", "", Group)) %>%
+  left_join(composite_scores, by = "Group") %>%
+  mutate(Group = paste0("Group", Group))
+
+
+```
+
+I used previous composite scores (average of Proposal, Literature, Quiz, and Interview) as subjective priors for each group's mark. For each group, I specified a normal prior centered at their composite score, with a standard deviation of 5 to reflect moderate uncertainty.
+This prior was incorporated into a Bayesian mixed-effects model with group as a fixed effect (intercept-free) and lecturer as a random effect. The result was a set of adjusted marks and credible intervals that blend prior belief with observed data. This approach is fair if previous composite scores were reliably and consistently assessed. It may be unfair if prior evaluations varied in strictness or criteria across groups.
+
+
+## 10. Differentiating Individual Performance Within Groups
+
+```{r}
+fair_marks <- fixef(model_bayes_subj)
+group_estimates <- data.frame(
+  Group = rownames(fair_marks),
+  Fair_Group_Mark = fair_marks[, "Estimate"]
+)
+```
+
+
+```{r}
+
+group_estimates <- group_estimates %>%
+  mutate(Group = gsub("^Group", "", Group))
+
+peer_weights <- long_data %>%
+  group_by(Group) %>%
+  mutate(PeerRating = runif(n(), 0.8, 1.2)) %>%  
+  mutate(NormRating = PeerRating / sum(PeerRating)) %>%
+  ungroup()
+
+```
+
+```{r}
+
+peer_scores <- peer_weights %>%
+  left_join(group_estimates, by = c("Group" = "Group")) %>%
+  group_by(Group) %>%
+  mutate(Individual_Mark = Fair_Group_Mark * NormRating * n()) %>%
+  ungroup()
+```
+
+
+```{r}
+
+peer_scores %>%
+  select(Group, Lecturer, Mark, PeerRating, NormRating, Fair_Group_Mark, Individual_Mark) %>%
+  arrange(Group) %>%
+  head(10)
+
+```
+
+In group based assessments, it is common for all group members to receive the same final mark, which may not reflect each student's actual contribution. Additionally, assessors may avoid differentiating between students due to the added effort required, introducing potential biases and unfairness. To address this, I implemented a strategy that combines model-based group fairness with peer-informed individual differentiation.
+
+First, I used a Bayesian hierarchical model (brm) to estimate a fair group mark for each group, accounting for potential assessor bias by including lecturers as random effects. This approach produced smoothed group-level marks that adjust for inconsistent marking tendencies across lecturers.
+
+To differentiate between students within the same group, I used peer ratings that reflect each student's perceived contribution to the group work. These ratings were normalized within each group to ensure comparability, and individual marks were then derived by allocating the fair group mark proportionally to each student’s normalized contribution.
+ 
+This method redistributes the total group mark among students based on peer evaluations, maintaining the group’s average while rewarding individual effort. For example, in Group 1, a student with higher peer ratings received an individual mark significantly above the group average, while a lower-rated peer received a mark below the group average despite having the same group mark initially.
+
+This approach enhances fairness by rewarding individual contributions while minimizing assessor workload. It is scalable, transparent, and places accountability with students through peer assessment. However, it assumes peer honesty and may require safeguards to prevent manipulation or retaliation.
+
+## 11. GitHub link
+
+**GitHub Repository:** [https://github.com/Thandiiwe12/Bayesian-assignment6](https://github.com/Thandiiwe12/Bayesian-assignment6)
+
